@@ -164,6 +164,10 @@ func DetermineEmbeddingModelType(model string) (string, error) {
 	switch {
 	case strings.Contains(model, "amazon.titan-embed-text"):
 		return "titan", nil
+	case strings.Contains(model, "amazon.titan-embed-image"):
+		return "titan", nil
+	case strings.Contains(model, "amazon.nova-2-multimodal-embeddings"):
+		return "titan", nil
 	case strings.Contains(model, "cohere.embed"):
 		return "cohere", nil
 	default:
