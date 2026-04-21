@@ -24,12 +24,13 @@
   ENV CGO_ENABLED=1 GOOS=linux
   
   COPY transports/go.mod transports/go.sum ./
-  RUN ls
-  RUN cat go.mod
-  RUN go mod download
   
-  # Copy source code and dependencies
+  # Copy source code and local module dependencies
+  COPY core/ /core/
+  COPY framework/ /framework/
   COPY transports/ ./
+  
+  RUN go mod download
   
   COPY --from=ui-builder /app/out ./bifrost-http/ui
   
