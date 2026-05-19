@@ -166,6 +166,10 @@ func DetermineEmbeddingModelType(model string) (string, error) {
 		return "titan", nil
 	case strings.Contains(model, "cohere.embed"):
 		return "cohere", nil
+	case strings.Contains(model, "amazon.titan-embed-image"):
+		return "titan", nil
+	case strings.Contains(model, "amazon.nova-2-multimodal-embeddings"):
+		return "titan", nil
 	default:
 		return "", fmt.Errorf("unsupported embedding model: %s", model)
 	}
@@ -189,7 +193,7 @@ func (r *BedrockCohereEmbeddingResponse) ToBifrostEmbeddingResponse() (*schemas.
 			Float   [][]float32 `json:"float"`
 			Base64  []string    `json:"base64"`
 			Int8    [][]int8    `json:"int8"`
-			Uint8   [][]int32   `json:"uint8"`  // int32 avoids []byte→base64 JSON issue
+			Uint8   [][]int32   `json:"uint8"` // int32 avoids []byte→base64 JSON issue
 			Binary  [][]int8    `json:"binary"`
 			Ubinary [][]int32   `json:"ubinary"` // int32 avoids []byte→base64 JSON issue
 		}
