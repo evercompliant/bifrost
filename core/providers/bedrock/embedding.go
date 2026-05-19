@@ -13,15 +13,22 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 	if bifrostReq == nil {
 		return nil, fmt.Errorf("bifrost embedding request is nil")
 	}
+	if bifrostReq.Input == nil {
+		return nil, fmt.Errorf("no input provided for embedding")
+	}
 
-	// Validate that only single text input is provided for Titan models
-	if bifrostReq.Input.Text == nil && len(bifrostReq.Input.Texts) == 0 {
-		return nil, fmt.Errorf("no input text provided for embedding")
+	hasText := bifrostReq.Input.Text != nil || len(bifrostReq.Input.Texts) > 0
+	var hasImage bool
+	if bifrostReq.Params != nil && bifrostReq.Params.ExtraParams != nil {
+		_, hasImage = bifrostReq.Params.ExtraParams["inputImage"]
+	}
+	if !hasText && !hasImage {
+		return nil, fmt.Errorf("no input text or image provided for embedding")
 	}
 
 	titanReq := &BedrockTitanEmbeddingRequest{}
 
-	// Set input text
+	// Set input text only when text is actually present; image-only requests omit this field
 	if bifrostReq.Input.Text != nil {
 		titanReq.InputText = *bifrostReq.Input.Text
 	} else if len(bifrostReq.Input.Texts) > 0 {
