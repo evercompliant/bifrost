@@ -46,13 +46,30 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 				titanReq.Normalize = &b
 			}
 		}
-		// Forward remaining extra params (excluding normalize which is now a first-class field)
+
+		// Lift inputImage into typed field for guaranteed wire-format inclusion
+		// (does not depend on BifrostContextKeyPassthroughExtraParams).
+		var inputImageLifted bool
+		if img, ok := bifrostReq.Params.ExtraParams["inputImage"]; ok {
+			if s, ok := img.(string); ok {
+				titanReq.InputImage = s
+				inputImageLifted = true
+			}
+		}
+
+		// Forward remaining extra params, excluding fields now represented as
+		// first-class struct fields. Only exclude inputImage when it was actually
+		// lifted (string case); non-string values stay in ExtraParams for passthrough.
 		if len(bifrostReq.Params.ExtraParams) > 0 {
 			extra := make(map[string]interface{})
 			for k, v := range bifrostReq.Params.ExtraParams {
-				if k != "normalize" {
-					extra[k] = v
+				if k == "normalize" {
+					continue
 				}
+				if k == "inputImage" && inputImageLifted {
+					continue
+				}
+				extra[k] = v
 			}
 			if len(extra) > 0 {
 				titanReq.ExtraParams = extra

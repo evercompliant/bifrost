@@ -177,13 +177,14 @@ func TestToBedrockTitanEmbeddingRequest_ImageOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, req)
 	assert.Equal(t, "", req.InputText)
-	require.NotNil(t, req.ExtraParams)
-	assert.Equal(t, inputImage, req.ExtraParams["inputImage"])
+	assert.Equal(t, inputImage, req.InputImage)
+	assert.NotContains(t, req.ExtraParams, "inputImage")
 
-	// Confirm the wire format does not include "inputText" (proving omitempty works)
+	// Confirm the wire format includes "inputImage" and does not include "inputText"
 	wireBytes, marshalErr := json.Marshal(req)
 	require.NoError(t, marshalErr)
 	assert.NotContains(t, string(wireBytes), `"inputText"`)
+	assert.Contains(t, string(wireBytes), `"inputImage"`)
 }
 
 func TestToBedrockTitanEmbeddingRequest_RejectsNoInput(t *testing.T) {
@@ -214,17 +215,18 @@ func TestToBedrockTitanEmbeddingRequest_TextAndImage(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, req)
 	assert.Equal(t, inputText, req.InputText)
-	require.NotNil(t, req.ExtraParams)
-	assert.Equal(t, inputImage, req.ExtraParams["inputImage"])
+	assert.Equal(t, inputImage, req.InputImage)
+	assert.NotContains(t, req.ExtraParams, "inputImage")
 
 	// Both text and image should appear in the wire format
 	wireBytes, marshalErr := json.Marshal(req)
 	require.NoError(t, marshalErr)
 	assert.Contains(t, string(wireBytes), `"inputText"`)
+	assert.Contains(t, string(wireBytes), `"inputImage"`)
 }
 
 
-func TestToBedrockTitanEmbeddingRequestPreservesInputImageExtraParam(t *testing.T) {
+func TestToBedrockTitanEmbeddingRequestLiftsInputImageAndNormalize(t *testing.T) {
 	inputText := "multimodal embedding"
 	inputImage := "iVBORw0KGgoAAAANSUhEUgAA"
 	normalize := true
@@ -244,9 +246,30 @@ func TestToBedrockTitanEmbeddingRequestPreservesInputImageExtraParam(t *testing.
 	require.NoError(t, err)
 	require.NotNil(t, req)
 	assert.Equal(t, inputText, req.InputText)
+	assert.Equal(t, inputImage, req.InputImage)
 	require.NotNil(t, req.Normalize)
 	assert.True(t, *req.Normalize)
-	require.NotNil(t, req.ExtraParams)
-	assert.Equal(t, inputImage, req.ExtraParams["inputImage"])
+	assert.NotContains(t, req.ExtraParams, "inputImage")
 	assert.NotContains(t, req.ExtraParams, "normalize")
+}
+
+func TestToBedrockTitanEmbeddingRequest_NonStringInputImage(t *testing.T) {
+	inputText := "text with non-string image"
+
+	req, err := ToBedrockTitanEmbeddingRequest(&schemas.BifrostEmbeddingRequest{
+		Input: &schemas.EmbeddingInput{
+			Text: &inputText,
+		},
+		Params: &schemas.EmbeddingParameters{
+			ExtraParams: map[string]interface{}{
+				"inputImage": 42, // non-string: should not be lifted
+			},
+		},
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, req)
+	assert.Equal(t, "", req.InputImage)
+	require.NotNil(t, req.ExtraParams)
+	assert.Equal(t, 42, req.ExtraParams["inputImage"])
 }
