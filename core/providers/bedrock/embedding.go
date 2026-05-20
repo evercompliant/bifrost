@@ -13,11 +13,8 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 	if bifrostReq == nil {
 		return nil, fmt.Errorf("bifrost embedding request is nil")
 	}
-	if bifrostReq.Input == nil {
-		return nil, fmt.Errorf("no input provided for embedding")
-	}
 
-	hasText := bifrostReq.Input.Text != nil || len(bifrostReq.Input.Texts) > 0
+	hasText := bifrostReq.Input != nil && (bifrostReq.Input.Text != nil || len(bifrostReq.Input.Texts) > 0)
 	var hasImage bool
 	if bifrostReq.Params != nil && bifrostReq.Params.ExtraParams != nil {
 		_, hasImage = bifrostReq.Params.ExtraParams["inputImage"]
@@ -29,9 +26,9 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 	titanReq := &BedrockTitanEmbeddingRequest{}
 
 	// Set input text only when text is actually present; image-only requests omit this field
-	if bifrostReq.Input.Text != nil {
+	if bifrostReq.Input != nil && bifrostReq.Input.Text != nil {
 		titanReq.InputText = *bifrostReq.Input.Text
-	} else if len(bifrostReq.Input.Texts) > 0 {
+	} else if bifrostReq.Input != nil && len(bifrostReq.Input.Texts) > 0 {
 		var embeddingText string
 		for _, text := range bifrostReq.Input.Texts {
 			embeddingText += text + " \n"
