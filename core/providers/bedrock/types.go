@@ -851,7 +851,8 @@ type BedrockMetadataEvent struct {
 
 // BedrockTitanEmbeddingRequest represents a Bedrock Titan embedding request
 type BedrockTitanEmbeddingRequest struct {
-	InputText   string                 `json:"inputText"`            // Required: Text to embed
+	InputText   string                 `json:"inputText,omitempty"`  // Optional: text to embed (omitted for image-only multimodal requests)
+	InputImage  string                 `json:"inputImage,omitempty"` // Optional: base64-encoded image for titan-embed-image-v1 multimodal embeddings
 	Dimensions  *int                   `json:"dimensions,omitempty"` // Optional: 256, 512, or 1024 (titan-embed-text-v2 only)
 	Normalize   *bool                  `json:"normalize,omitempty"`  // Optional: normalize the embedding
 	ExtraParams map[string]interface{} `json:"-"`
@@ -913,6 +914,73 @@ type BedrockCohereEmbeddingResponse struct {
 	Embeddings   json.RawMessage `json:"embeddings"`
 	ResponseType string          `json:"response_type"`
 	Texts        []string        `json:"texts,omitempty"`
+}
+
+// Amazon Nova multimodal embeddings (amazon.nova-2-multimodal-embeddings-v1:0).
+//
+// Nova's synchronous InvokeModel embedding API uses a "SINGLE_EMBEDDING" task
+// where exactly one of text/image is set per call — Nova does NOT fuse text and
+// image in one request. Multi-input ("hybrid") embedding is therefore
+// orchestrated by Bifrost as N separate calls whose vectors are mean-pooled and
+// L2-normalized (see buildNovaEmbeddingRequests / meanPoolAndNormalize).
+//
+// Video/audio embedding and the async StartAsyncInvoke API are intentionally
+// out of scope; the taskType field is kept as a distinct constant so those can
+// be added later without reshaping this envelope.
+const NovaTaskTypeSingleEmbedding = "SINGLE_EMBEDDING"
+
+// BedrockNovaEmbeddingRequest is the Nova synchronous InvokeModel embedding body.
+type BedrockNovaEmbeddingRequest struct {
+	TaskType              string                           `json:"taskType"`
+	SingleEmbeddingParams BedrockNovaSingleEmbeddingParams `json:"singleEmbeddingParams"`
+	ExtraParams           map[string]interface{}           `json:"-"`
+}
+
+// GetExtraParams implements the RequestBodyWithExtraParams interface.
+func (req *BedrockNovaEmbeddingRequest) GetExtraParams() map[string]interface{} {
+	return req.ExtraParams
+}
+
+// BedrockNovaSingleEmbeddingParams carries the per-call SINGLE_EMBEDDING params.
+// Exactly one of Text/Image is set for a given call.
+type BedrockNovaSingleEmbeddingParams struct {
+	EmbeddingPurpose   string                     `json:"embeddingPurpose,omitempty"`
+	EmbeddingDimension *int                       `json:"embeddingDimension,omitempty"`
+	Text               *BedrockNovaEmbeddingText  `json:"text,omitempty"`
+	Image              *BedrockNovaEmbeddingImage `json:"image,omitempty"`
+}
+
+// BedrockNovaEmbeddingText is the text input for a Nova single-embedding call.
+type BedrockNovaEmbeddingText struct {
+	TruncationMode string `json:"truncationMode,omitempty"` // START | END | NONE
+	Value          string `json:"value"`
+}
+
+// BedrockNovaEmbeddingImage is the image input for a Nova single-embedding call.
+type BedrockNovaEmbeddingImage struct {
+	DetailLevel string                 `json:"detailLevel,omitempty"` // STANDARD_IMAGE | DOCUMENT_IMAGE
+	Format      string                 `json:"format"`                // png | jpeg | gif | webp
+	Source      BedrockImageSourceData `json:"source"`
+}
+
+// BedrockNovaEmbeddingResponse is the Nova single-embedding InvokeModel response.
+type BedrockNovaEmbeddingResponse struct {
+	Embeddings []BedrockNovaEmbeddingItem `json:"embeddings"`
+}
+
+// BedrockNovaEmbeddingItem is a single embedding entry from a Nova response.
+type BedrockNovaEmbeddingItem struct {
+	EmbeddingType       string    `json:"embeddingType"` // TEXT | IMAGE | VIDEO | AUDIO | AUDIO_VIDEO_COMBINED
+	Embedding           []float64 `json:"embedding"`
+	TruncatedCharLength int       `json:"truncatedCharLength"`
+}
+
+// FirstEmbedding returns the first embedding vector from the response, or nil.
+func (r *BedrockNovaEmbeddingResponse) FirstEmbedding() []float64 {
+	if r == nil || len(r.Embeddings) == 0 {
+		return nil
+	}
+	return r.Embeddings[0].Embedding
 }
 
 const TaskTypeTextImage = "TEXT_IMAGE"

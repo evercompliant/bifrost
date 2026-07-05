@@ -112,3 +112,111 @@ func TestToBedrockCohereEmbeddingRequestBodyOmitsModel(t *testing.T) {
 		"embedding_types": ["float"]
 	}`, string(wireBody))
 }
+
+func TestToBedrockTitanEmbeddingRequest(t *testing.T) {
+	t.Run("returns error for nil request", func(t *testing.T) {
+		req, err := ToBedrockTitanEmbeddingRequest(nil)
+		require.Error(t, err)
+		assert.Nil(t, req)
+		assert.Contains(t, err.Error(), "nil")
+	})
+
+	t.Run("returns error when neither text nor image provided", func(t *testing.T) {
+		req, err := ToBedrockTitanEmbeddingRequest(&schemas.BifrostEmbeddingRequest{
+			Input: &schemas.EmbeddingInput{},
+		})
+		require.Error(t, err)
+		assert.Nil(t, req)
+		assert.Contains(t, err.Error(), "no input text or image")
+	})
+
+	t.Run("text-only request sets inputText and no image", func(t *testing.T) {
+		text := "hello"
+		req, err := ToBedrockTitanEmbeddingRequest(&schemas.BifrostEmbeddingRequest{
+			Model: "amazon.titan-embed-text-v2:0",
+			Input: &schemas.EmbeddingInput{Text: &text},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, req)
+		assert.Equal(t, "hello", req.InputText)
+		assert.Equal(t, "", req.InputImage)
+	})
+
+	t.Run("image-only request lifts inputImage and omits text", func(t *testing.T) {
+		req, err := ToBedrockTitanEmbeddingRequest(&schemas.BifrostEmbeddingRequest{
+			Model: "amazon.titan-embed-image-v1",
+			Input: &schemas.EmbeddingInput{},
+			Params: &schemas.EmbeddingParameters{
+				ExtraParams: map[string]interface{}{"inputImage": "BASE64DATA"},
+			},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, req)
+		assert.Equal(t, "", req.InputText)
+		assert.Equal(t, "BASE64DATA", req.InputImage)
+		// inputImage must be lifted out of ExtraParams once consumed.
+		_, present := req.ExtraParams["inputImage"]
+		assert.False(t, present)
+	})
+
+	t.Run("text plus image sets both fields", func(t *testing.T) {
+		text := "a cat"
+		req, err := ToBedrockTitanEmbeddingRequest(&schemas.BifrostEmbeddingRequest{
+			Model: "amazon.titan-embed-image-v1",
+			Input: &schemas.EmbeddingInput{Text: &text},
+			Params: &schemas.EmbeddingParameters{
+				ExtraParams: map[string]interface{}{"inputImage": "BASE64DATA"},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "a cat", req.InputText)
+		assert.Equal(t, "BASE64DATA", req.InputImage)
+	})
+
+	t.Run("empty-string inputImage is treated as absent", func(t *testing.T) {
+		req, err := ToBedrockTitanEmbeddingRequest(&schemas.BifrostEmbeddingRequest{
+			Model: "amazon.titan-embed-image-v1",
+			Input: &schemas.EmbeddingInput{},
+			Params: &schemas.EmbeddingParameters{
+				ExtraParams: map[string]interface{}{"inputImage": ""},
+			},
+		})
+		require.Error(t, err)
+		assert.Nil(t, req)
+		assert.Contains(t, err.Error(), "no input text or image")
+	})
+
+	t.Run("non-string inputImage stays in ExtraParams for passthrough", func(t *testing.T) {
+		text := "hello"
+		req, err := ToBedrockTitanEmbeddingRequest(&schemas.BifrostEmbeddingRequest{
+			Model: "amazon.titan-embed-image-v1",
+			Input: &schemas.EmbeddingInput{Text: &text},
+			Params: &schemas.EmbeddingParameters{
+				ExtraParams: map[string]interface{}{"inputImage": 123},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "", req.InputImage)
+		assert.Equal(t, 123, req.ExtraParams["inputImage"])
+	})
+
+	t.Run("image-only wire body omits empty inputText", func(t *testing.T) {
+		bifrostReq := &schemas.BifrostEmbeddingRequest{
+			Model: "amazon.titan-embed-image-v1",
+			Input: &schemas.EmbeddingInput{},
+			Params: &schemas.EmbeddingParameters{
+				ExtraParams: map[string]interface{}{"inputImage": "BASE64DATA"},
+			},
+		}
+		wireBody, bifrostErr := providerUtils.CheckContextAndGetRequestBody(
+			context.Background(),
+			bifrostReq,
+			func() (providerUtils.RequestBodyWithExtraParams, error) {
+				return ToBedrockTitanEmbeddingRequest(bifrostReq)
+			},
+		)
+		require.Nil(t, bifrostErr)
+		assert.NotContains(t, string(wireBody), `"inputText"`)
+		assert.JSONEq(t, `{"inputImage": "BASE64DATA"}`, string(wireBody))
+	})
+}
