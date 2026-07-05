@@ -1,8 +1,10 @@
 package bedrock
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -36,17 +38,31 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 		return nil, fmt.Errorf("bifrost embedding request is nil")
 	}
 
-	// Validate that only single text input is provided for Titan models
-	if bifrostReq.Input.Text == nil && len(bifrostReq.Input.Texts) == 0 {
-		return nil, fmt.Errorf("no input text provided for embedding")
+	// Validate that text or image input is provided for Titan models.
+	// Titan multimodal (amazon.titan-embed-image-v1) accepts an image-only
+	// request, so we no longer require text. hasImage requires a non-empty
+	// string value, matching the lifting contract below: treating any other
+	// value (nil, non-string, empty string) as "present" would let validation
+	// pass and then ship an empty {} wire body to AWS.
+	hasText := bifrostReq.Input != nil && (bifrostReq.Input.Text != nil || len(bifrostReq.Input.Texts) > 0)
+	var hasImage bool
+	if bifrostReq.Params != nil && bifrostReq.Params.ExtraParams != nil {
+		if img, ok := bifrostReq.Params.ExtraParams["inputImage"]; ok {
+			if s, ok := img.(string); ok && s != "" {
+				hasImage = true
+			}
+		}
+	}
+	if !hasText && !hasImage {
+		return nil, fmt.Errorf("no input text or image provided for embedding")
 	}
 
 	titanReq := &BedrockTitanEmbeddingRequest{}
 
-	// Set input text
-	if bifrostReq.Input.Text != nil {
+	// Set input text only when text is actually present; image-only requests omit this field.
+	if bifrostReq.Input != nil && bifrostReq.Input.Text != nil {
 		titanReq.InputText = *bifrostReq.Input.Text
-	} else if len(bifrostReq.Input.Texts) > 0 {
+	} else if bifrostReq.Input != nil && len(bifrostReq.Input.Texts) > 0 {
 		var embeddingText string
 		for _, text := range bifrostReq.Input.Texts {
 			embeddingText += text + " \n"
@@ -61,13 +77,30 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 				titanReq.Normalize = &b
 			}
 		}
-		// Forward remaining extra params (excluding normalize which is now a first-class field)
+
+		// Lift inputImage into the typed field for guaranteed wire-format
+		// inclusion (does not depend on the passthrough-extra-params context key).
+		var inputImageLifted bool
+		if img, ok := bifrostReq.Params.ExtraParams["inputImage"]; ok {
+			if s, ok := img.(string); ok && s != "" {
+				titanReq.InputImage = s
+				inputImageLifted = true
+			}
+		}
+
+		// Forward remaining extra params, excluding fields now represented as
+		// first-class struct fields. Only exclude inputImage when it was actually
+		// lifted (string case); non-string values stay in ExtraParams for passthrough.
 		if len(bifrostReq.Params.ExtraParams) > 0 {
 			extra := make(map[string]interface{})
 			for k, v := range bifrostReq.Params.ExtraParams {
-				if k != "normalize" {
-					extra[k] = v
+				if k == "normalize" {
+					continue
 				}
+				if k == "inputImage" && inputImageLifted {
+					continue
+				}
+				extra[k] = v
 			}
 			if len(extra) > 0 {
 				titanReq.ExtraParams = extra
@@ -188,6 +221,8 @@ func ToBedrockCohereEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest
 // Bedrock deployment that's tagged with the right family routes correctly.
 func DetermineEmbeddingModelType(ctx *schemas.BifrostContext, model string) (string, error) {
 	switch {
+	case schemas.IsNovaModelFamily(ctx, model):
+		return "nova", nil
 	case schemas.IsTitanModelFamily(ctx, model):
 		return "titan", nil
 	case schemas.IsCohereModelFamily(ctx, model):
@@ -294,4 +329,267 @@ func (r *BedrockCohereEmbeddingResponse) ToBifrostEmbeddingResponse() (*schemas.
 	}
 
 	return bifrostResponse, nil
+}
+
+// ==================== NOVA MULTIMODAL EMBEDDINGS ====================
+
+// ExtraParams keys understood by the Nova embedding request builder.
+//
+//	embeddingPurpose : raw Nova purpose enum (GENERIC_INDEX, GENERIC_RETRIEVAL, ...),
+//	                   takes precedence over input_type-derived mapping.
+//	input_type       : Cohere-style hint (search_document / search_query / ...)
+//	                   mapped to a Nova purpose when embeddingPurpose is absent.
+//	truncationMode   : text truncation mode (START | END | NONE); defaults to END.
+//	detailLevel      : image detail level (STANDARD_IMAGE | DOCUMENT_IMAGE).
+//	inputImage       : single image (data-URI, http(s) URL, or raw base64).
+//	inputImages      : []string of images for the multi-image (hybrid) case.
+const (
+	novaExtraParamEmbeddingPurpose = "embeddingPurpose"
+	novaExtraParamInputType        = "input_type"
+	novaExtraParamTruncationMode   = "truncationMode"
+	novaExtraParamDetailLevel      = "detailLevel"
+	novaExtraParamInputImage       = "inputImage"
+	novaExtraParamInputImages      = "inputImages"
+)
+
+// novaMaxBase64ImageLen mirrors the Python reference: Nova accepts ~5MB of raw
+// image, which is ~6.7MB base64-encoded. Reject anything larger than ~6.5MB of
+// encoded bytes as "image too large" rather than forwarding a doomed request.
+const novaMaxBase64ImageLen = 6_500_000
+
+// novaDefaultPurpose is used when neither embeddingPurpose nor input_type is set.
+const novaDefaultPurpose = "GENERIC_INDEX"
+
+// novaPurpose maps a Cohere-style input_type hint to a Nova embeddingPurpose.
+// Index-time inputs map to GENERIC_INDEX and query-time inputs to
+// GENERIC_RETRIEVAL, mirroring the Python _nova_purpose(input_type) helper.
+// Unknown/empty values fall back to novaDefaultPurpose.
+func novaPurpose(inputType string) string {
+	switch strings.ToLower(strings.TrimSpace(inputType)) {
+	case "search_query", "query", "retrieval", "generic_retrieval":
+		return "GENERIC_RETRIEVAL"
+	case "search_document", "document", "index", "generic_index":
+		return "GENERIC_INDEX"
+	case "classification":
+		return "CLASSIFICATION"
+	case "clustering":
+		return "CLUSTERING"
+	case "image", "image_retrieval":
+		return "IMAGE_RETRIEVAL"
+	default:
+		return novaDefaultPurpose
+	}
+}
+
+// resolveNovaPurpose picks the embeddingPurpose for a request: an explicit
+// embeddingPurpose ExtraParam wins (raw enum passthrough), otherwise the
+// input_type hint is mapped, otherwise the default.
+func resolveNovaPurpose(extra map[string]interface{}) string {
+	if v, ok := extra[novaExtraParamEmbeddingPurpose]; ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	if v, ok := extra[novaExtraParamInputType]; ok {
+		if s, ok := v.(string); ok {
+			return novaPurpose(s)
+		}
+	}
+	return novaDefaultPurpose
+}
+
+// cleanNovaBase64 strips whitespace (newlines, carriage returns, spaces) from a
+// base64 payload, mirroring the Python image cleaning step.
+func cleanNovaBase64(b64 string) string {
+	replacer := strings.NewReplacer("\n", "", "\r", "", " ", "", "\t", "")
+	return strings.TrimSpace(replacer.Replace(b64))
+}
+
+// novaCollectImageInputs gathers image inputs from ExtraParams, accepting either
+// a single inputImage string or an inputImages []string (or []interface{} of
+// strings, since ExtraParams often round-trips through JSON).
+func novaCollectImageInputs(extra map[string]interface{}) []string {
+	var images []string
+	if v, ok := extra[novaExtraParamInputImage]; ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			images = append(images, s)
+		}
+	}
+	switch v := extra[novaExtraParamInputImages].(type) {
+	case []string:
+		images = append(images, v...)
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				images = append(images, s)
+			}
+		}
+	}
+	return images
+}
+
+// resolveNovaImage normalizes a single image input (data-URI, URL, or raw
+// base64) into Nova's format + base64-bytes shape, then applies base64 cleaning
+// and the encoded-size cap. It returns an error for invalid/oversized images so
+// callers can decide whether to skip (hybrid) or fail (image-only).
+func resolveNovaImage(ctx context.Context, image, detailLevel string) (*BedrockNovaEmbeddingImage, error) {
+	src, err := convertImageToBedrockSource(ctx, image)
+	if err != nil {
+		return nil, fmt.Errorf("invalid image input: %w", err)
+	}
+	if src.Source.Bytes == nil {
+		return nil, fmt.Errorf("invalid image input: no image bytes")
+	}
+	clean := cleanNovaBase64(*src.Source.Bytes)
+	if clean == "" {
+		return nil, fmt.Errorf("invalid image input: empty image bytes")
+	}
+	if len(clean) > novaMaxBase64ImageLen {
+		return nil, fmt.Errorf("image too large: %d base64 bytes exceeds limit of %d", len(clean), novaMaxBase64ImageLen)
+	}
+	return &BedrockNovaEmbeddingImage{
+		DetailLevel: detailLevel,
+		Format:      src.Format,
+		Source:      BedrockImageSourceData{Bytes: &clean},
+	}, nil
+}
+
+// buildNovaEmbeddingRequests builds the ordered list of Nova single-embedding
+// requests for a Bifrost embedding request: one text request (when text is
+// present) followed by one request per valid image. This mirrors the Python
+// reference: text-only → 1 call, image-only → 1 call, hybrid → 1 text call plus
+// one call per valid image (invalid/oversized images are skipped). ctx is
+// required to normalize image inputs (which may be URLs that need fetching).
+//
+// It returns an error when nothing embeddable remains — e.g. no text and every
+// image was invalid/oversized — surfacing the last image error (such as "image
+// too large") so the caller gets an actionable message.
+func buildNovaEmbeddingRequests(ctx context.Context, bifrostReq *schemas.BifrostEmbeddingRequest) ([]*BedrockNovaEmbeddingRequest, error) {
+	if bifrostReq == nil {
+		return nil, fmt.Errorf("bifrost embedding request is nil")
+	}
+	if bifrostReq.Input == nil {
+		return nil, fmt.Errorf("no input provided for embedding")
+	}
+
+	var extra map[string]interface{}
+	var dimensions *int
+	if bifrostReq.Params != nil {
+		extra = bifrostReq.Params.ExtraParams
+		dimensions = bifrostReq.Params.Dimensions
+	}
+	purpose := resolveNovaPurpose(extra)
+
+	truncationMode := "END"
+	if v, ok := extra[novaExtraParamTruncationMode]; ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			truncationMode = s
+		}
+	}
+	var detailLevel string
+	if v, ok := extra[novaExtraParamDetailLevel]; ok {
+		if s, ok := v.(string); ok {
+			detailLevel = s
+		}
+	}
+
+	// Assemble text from Text or (space-joined) Texts, matching Titan behavior.
+	var text string
+	if bifrostReq.Input.Text != nil {
+		text = *bifrostReq.Input.Text
+	} else if len(bifrostReq.Input.Texts) > 0 {
+		var b strings.Builder
+		for _, t := range bifrostReq.Input.Texts {
+			b.WriteString(t)
+			b.WriteString(" \n")
+		}
+		text = b.String()
+	}
+
+	var requests []*BedrockNovaEmbeddingRequest
+	if strings.TrimSpace(text) != "" {
+		requests = append(requests, &BedrockNovaEmbeddingRequest{
+			TaskType: NovaTaskTypeSingleEmbedding,
+			SingleEmbeddingParams: BedrockNovaSingleEmbeddingParams{
+				EmbeddingPurpose:   purpose,
+				EmbeddingDimension: dimensions,
+				Text:               &BedrockNovaEmbeddingText{TruncationMode: truncationMode, Value: text},
+			},
+		})
+	}
+
+	var lastImageErr error
+	for _, image := range novaCollectImageInputs(extra) {
+		img, err := resolveNovaImage(ctx, image, detailLevel)
+		if err != nil {
+			// Skip invalid/oversized images (mirrors _is_valid_image_b64 filtering
+			// and the ImageTooLarge rejection); remember the reason in case nothing
+			// embeddable is left.
+			lastImageErr = err
+			continue
+		}
+		requests = append(requests, &BedrockNovaEmbeddingRequest{
+			TaskType: NovaTaskTypeSingleEmbedding,
+			SingleEmbeddingParams: BedrockNovaSingleEmbeddingParams{
+				EmbeddingPurpose:   purpose,
+				EmbeddingDimension: dimensions,
+				Image:              img,
+			},
+		})
+	}
+
+	if len(requests) == 0 {
+		if lastImageErr != nil {
+			return nil, lastImageErr
+		}
+		return nil, fmt.Errorf("no input provided for embedding")
+	}
+	return requests, nil
+}
+
+// meanPoolAndNormalize element-wise mean-pools the given vectors and L2
+// normalizes the result, mirroring the Python _nova_embed_product pooling.
+// It returns nil for no vectors, the single vector unchanged for exactly one,
+// and the pooled+normalized vector otherwise. Vectors shorter than the first
+// are treated as zero-padded so a truncated/odd response cannot panic.
+func meanPoolAndNormalize(vecs [][]float64) []float64 {
+	if len(vecs) == 0 {
+		return nil
+	}
+	if len(vecs) == 1 {
+		return vecs[0]
+	}
+
+	dim := 0
+	for _, v := range vecs {
+		if len(v) > dim {
+			dim = len(v)
+		}
+	}
+	if dim == 0 {
+		return []float64{}
+	}
+
+	pooled := make([]float64, dim)
+	for _, v := range vecs {
+		for i, x := range v {
+			pooled[i] += x
+		}
+	}
+	n := float64(len(vecs))
+	for i := range pooled {
+		pooled[i] /= n
+	}
+
+	var sumSq float64
+	for _, x := range pooled {
+		sumSq += x * x
+	}
+	norm := math.Sqrt(sumSq)
+	if norm > 0 {
+		for i := range pooled {
+			pooled[i] /= norm
+		}
+	}
+	return pooled
 }
