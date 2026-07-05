@@ -1958,6 +1958,13 @@ func (provider *BedrockProvider) Embedding(ctx *schemas.BifrostContext, key sche
 	var jsonData []byte
 
 	switch modelType {
+	case "nova":
+		// Nova multimodal embeddings can require multiple InvokeModel calls
+		// (one per text/image input) whose vectors are pooled, so it is handled
+		// end-to-end by a dedicated orchestrator rather than the shared
+		// single-call build/parse flow below.
+		return provider.completeNovaEmbedding(ctx, key, request)
+
 	case "titan":
 		jsonData, bifrostError = providerUtils.CheckContextAndGetRequestBody(
 			ctx,
@@ -2047,6 +2054,111 @@ func (provider *BedrockProvider) Embedding(ctx *schemas.BifrostContext, key sche
 	if providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse) {
 		var rawResponseData interface{}
 		if err := sonic.Unmarshal(rawResponse, &rawResponseData); err == nil {
+			bifrostResponse.ExtraFields.RawResponse = rawResponseData
+		}
+	}
+
+	return bifrostResponse, nil
+}
+
+// completeNovaEmbedding orchestrates Amazon Nova multimodal embeddings. Nova's
+// SINGLE_EMBEDDING task embeds exactly one of text/image per InvokeModel call,
+// so a text+image ("hybrid") request is fanned out into one text call plus one
+// call per valid image; the resulting vectors are mean-pooled and L2-normalized
+// into a single embedding. Text-only and single-image requests short-circuit to
+// the one returned vector. Invalid/oversized images are skipped; if nothing
+// embeddable remains the build step returns an error.
+func (provider *BedrockProvider) completeNovaEmbedding(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
+	novaRequests, err := buildNovaEmbeddingRequests(ctx, request)
+	if err != nil {
+		return nil, providerUtils.NewBifrostOperationError("error building Nova embedding request", err)
+	}
+
+	path, _ := provider.getModelPathAndRegion(ctx, "invoke", request.Model, key)
+
+	var vectors [][]float64
+	var totalInputTokens int
+	var haveTokens bool
+	var latency time.Duration
+	var providerResponseHeaders map[string]string
+	var lastRawResponse []byte
+
+	// Number of underlying Nova InvokeModel calls made for this request. Bifrost
+	// has no per-response API-call-count field, so this is not surfaced to the
+	// caller; input-token usage is summed across calls into Usage below.
+	novaAPICalls := 0
+
+	for _, novaReq := range novaRequests {
+		novaReq := novaReq
+		jsonData, bifrostError := providerUtils.CheckContextAndGetRequestBody(
+			ctx,
+			request,
+			func() (providerUtils.RequestBodyWithExtraParams, error) {
+				return novaReq, nil
+			})
+		if bifrostError != nil {
+			return nil, bifrostError
+		}
+
+		rawResponse, callLatency, headers, bifrostError := provider.completeRequest(ctx, jsonData, path, key, request.Model)
+		novaAPICalls++
+		if headers != nil {
+			providerResponseHeaders = headers
+		}
+		if bifrostError != nil {
+			return nil, providerUtils.EnrichError(ctx, bifrostError, jsonData, nil, provider.sendBackRawRequest, provider.sendBackRawResponse)
+		}
+		latency += callLatency
+		lastRawResponse = rawResponse
+
+		var novaResp BedrockNovaEmbeddingResponse
+		if err := sonic.Unmarshal(rawResponse, &novaResp); err != nil {
+			return nil, providerUtils.EnrichError(ctx, providerUtils.NewBifrostOperationError("error parsing Nova embedding response", err), jsonData, rawResponse, provider.sendBackRawRequest, provider.sendBackRawResponse)
+		}
+		if vec := novaResp.FirstEmbedding(); vec != nil {
+			vectors = append(vectors, vec)
+		}
+		if inputTokens, ok := inputTokensFromHeaders(headers); ok {
+			totalInputTokens += inputTokens
+			haveTokens = true
+		}
+	}
+
+	if providerResponseHeaders != nil {
+		ctx.SetValue(schemas.BifrostContextKeyProviderResponseHeaders, providerResponseHeaders)
+	}
+
+	// Mirror the Python fallback: pool whatever succeeded; a single vector is
+	// returned as-is; if every call failed to yield a vector, error out.
+	if len(vectors) == 0 {
+		return nil, providerUtils.EnrichError(ctx, providerUtils.NewBifrostOperationError("Nova returned no embeddings", nil), nil, lastRawResponse, provider.sendBackRawRequest, provider.sendBackRawResponse)
+	}
+	pooled := meanPoolAndNormalize(vectors)
+
+	bifrostResponse := &schemas.BifrostEmbeddingResponse{
+		Object: "list",
+		Model:  request.Model,
+		Data: []schemas.EmbeddingData{
+			{
+				Index:     0,
+				Object:    "embedding",
+				Embedding: schemas.EmbeddingStruct{EmbeddingArray: pooled},
+			},
+		},
+	}
+	if haveTokens {
+		bifrostResponse.Usage = &schemas.BifrostLLMUsage{
+			PromptTokens: totalInputTokens,
+			TotalTokens:  totalInputTokens,
+		}
+	}
+
+	bifrostResponse.ExtraFields.Latency = latency.Milliseconds()
+	bifrostResponse.ExtraFields.ProviderResponseHeaders = providerResponseHeaders
+
+	if providerUtils.ShouldSendBackRawResponse(ctx, provider.sendBackRawResponse) {
+		var rawResponseData interface{}
+		if err := sonic.Unmarshal(lastRawResponse, &rawResponseData); err == nil {
 			bifrostResponse.ExtraFields.RawResponse = rawResponseData
 		}
 	}
