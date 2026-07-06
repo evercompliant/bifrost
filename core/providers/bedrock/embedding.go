@@ -221,6 +221,11 @@ func ToBedrockCohereEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest
 // Bedrock deployment that's tagged with the right family routes correctly.
 func DetermineEmbeddingModelType(ctx *schemas.BifrostContext, model string) (string, error) {
 	switch {
+	// Explicit match for the multimodal embeddings model — it contains "nova"
+	// but not the "lite"/"sonic" markers some Nova-2 detectors gate on, so be
+	// unambiguous here rather than relying on family substring resolution.
+	case strings.Contains(model, "nova") && strings.Contains(model, "embed"):
+		return "nova", nil
 	case schemas.IsNovaModelFamily(ctx, model):
 		return "nova", nil
 	case schemas.IsTitanModelFamily(ctx, model):
