@@ -4,9 +4,41 @@
 
 Official Helm charts for deploying [Bifrost](https://github.com/maximhq/bifrost) - a high-performance AI gateway with unified interface for multiple providers.
 
-**Latest Version:** 2.1.29
+**Latest Version:** 2.1.34
 
 ## Changelog
+
+### 2.1.34
+
+- Added `bifrost.scim.config.roleResolutionStrategy` (`highestPermissionCount` default, or `order`) to pick a single role when a user matches multiple `attributeRoleMappings` — most-permissioned role vs first match in the list. Passes through into `scim_config.config.roleResolutionStrategy`.
+
+### 2.1.33
+
+- Fixed Helm schema validation failure for multi-profile OTEL configs (`bifrost.plugins.otel.config.profiles`), introduced by the `export_timeout` default in 2.1.32.
+
+### 2.1.32
+
+- Extended `bifrost.accessProfiles[].provider_configs[]` with `blacklisted_models` (denylist that wins over `allowed_models`; `["*"]` blocks every model, while an empty or omitted list blocks none), `weight` (load-balancer seed weight; `null` opts out), and `model_budgets[]` (per-model budget groups; each entry requires `model_name` and may carry optional `budgets[]` and a `rate_limit`). These pass through into `access_profiles[].provider_configs[]`.
+- Added `bifrost.scim.config.additionalScopes` (Okta) — an array of extra OAuth scopes requested on top of the base `openid/profile/email/offline_access` set, for Custom Authorization Servers where claims like `groups` are gated behind a scope Bifrost does not request by default. Passes through into `scim_config.config.additionalScopes`.
+- Added `bifrost.framework.pricing.liveModelsSyncInterval` (default `3600` seconds, minimum `60`, `0` disables) to control how often each provider's list-models response is re-fetched in the background. Renders into `framework.pricing.live_models_sync_interval`.
+- Added `storage.configStore.connMaxIdleTime` and `storage.logsStore.connMaxIdleTime` (Go duration, e.g. `5m`) to cap how long an idle PostgreSQL connection is kept before closing, so bursts above `maxIdleConns` stop churning physical connections. Each renders into its store's `conn_max_idle_time`.
+- Added `storage.logsStore.matviewRefreshTimeout` (Go duration, min 30s, max 30m; unset derives 5× the refresh interval, at least 5m) to bound a single materialized-view refresh pass. Renders into `logs_store.matview_refresh_timeout`.
+- Added `bifrost.plugins.otel.config.export_timeout` (seconds, 1–60, default 5) to bound a single trace export — the only timeout on gRPC exports. Renders into the OTEL plugin config's `export_timeout` (also wired the field through `_helpers.tpl`), and is omitted from the generated config when unset (or `0`).
+- Added `postgresql.external.passwordCommand.cache_ttl` (Go duration, default 60s) to control how long a resolved password is reused across new physical connections instead of re-running the command per connection. Passes through into `password_command.cache_ttl`.
+
+### 2.1.31
+
+- Added `bifrost.guardrails.rules[].stream_replay_event_interval_ms` to configure the delay between buffered events after block-capable output guardrails allow a streaming response; `0` keeps immediate delivery.
+
+### 2.1.30
+
+- Added `bifrost.client.retainContentInObjectStorage` (default off, commented out) to keep full request/response content in object storage when content logging is disabled — via the global `disableContentLogging` setting or the `x-bf-disable-content-logging` header — instead of dropping it. The content is hidden: the database row stays metadata-only and the UI/API never fetch the payload back, so it is only readable with direct access to the bucket. Requires `storage.logsStore.objectStorage.enabled: true`; without it the content is dropped as before. Renders into `client.retain_content_in_object_storage`.
+- Added top-level `bifrost.webhooks[]` endpoint declarations (name/url/events plus per-endpoint delivery tuning like `include_response`, `max_retries`, retry backoff, timeouts, and `max_concurrent_deliveries`), reconciled by name at startup. Renders directly into the top-level `webhooks` array. Also added `bifrost.client.webhookConfig.deliveryHistoryRetentionDays` (global delivery-history retention), rendering into `client.webhook_config.delivery_history_retention_days`.
+- Added `bifrost.loadBalancer.appendFallbacksToPinned` (default off) to append healthy providers eligible for a request's model as fallbacks behind a pinned provider. Renders into `load_balancer_config.append_fallbacks_to_pinned`.
+- Added audit-log object-storage archival tuning `bifrost.auditLogs.archiveInterval` (default `24h`), `archiveGracePeriod` (default `15m`), and `archiveMaxObjectBytes` (default 128MiB), rendering into `audit_logs.archive_interval` / `archive_grace_period` / `archive_max_object_bytes`.
+- Added `keep_alive_timeout_in_seconds` to provider `network_config` (default 30) to drop idle pooled connections before the upstream closes them. Renders into `network_config.keep_alive_timeout_in_seconds`.
+- Added `use_anthropic_endpoints` to provider keys (deepseek/fireworks/vllm/sgl) and to per-alias configs, routing chat completions and responses through Anthropic-compatible endpoints. Passes through into each key / alias as `use_anthropic_endpoints`.
+- Added SCIM auth-proxy / identity-aware-proxy support via `bifrost.scim.config.authProxy` (shared across all SCIM providers), for deployments fronted by a Zero Trust / ZTNA proxy — Cloudflare Access, a generic OIDC proxy, or AWS ALB. Carries `enabled`, `provider`, `mode` (`login_only`/`full`), the JWKS fields (`issuerUrl`/`jwksUrl`/`audience`/`allowedAudiences`/`headerName`), and the AWS ALB fields (`expectedSigner`/`region`/`publicKeyBaseUrl`), plus `userIdClaim`. Renders into `scim_config.config.authProxy`. (Also synced the field into the source-of-truth `transports/config.schema.json` so the generated config validates at startup.)
 
 ### 2.1.29
 
