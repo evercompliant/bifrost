@@ -296,7 +296,22 @@ func TestNovaEmbeddingWireBody(t *testing.T) {
 
 func TestDetermineEmbeddingModelTypeNova(t *testing.T) {
 	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
-	mt, err := DetermineEmbeddingModelType(ctx, "amazon.nova-2-multimodal-embeddings-v1:0")
-	require.NoError(t, err)
-	assert.Equal(t, "nova", mt)
+
+	t.Run("Nova multimodal embedding model routes to Nova embeddings", func(t *testing.T) {
+		modelType, err := DetermineEmbeddingModelType(ctx, "amazon.nova-2-multimodal-embeddings-v1:0")
+		require.NoError(t, err)
+		assert.Equal(t, "nova", modelType)
+	})
+
+	for _, model := range []string{
+		"amazon.nova-pro-v1:0",
+		"amazon.nova-lite-v1:0",
+		"amazon.nova-micro-v1:0",
+	} {
+		t.Run("generative model is rejected: "+model, func(t *testing.T) {
+			modelType, err := DetermineEmbeddingModelType(ctx, model)
+			require.Error(t, err)
+			assert.Empty(t, modelType)
+		})
+	}
 }
