@@ -264,18 +264,13 @@ func ToBedrockCohereEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest
 }
 
 // DetermineEmbeddingModelType determines the embedding model type for the
-// current attempt. It consults the resolved alias family first
-// (model_family / model_name / model_id / alias key) and falls back to the
-// substring detectors against the wire model — so an alias to an opaque
-// Bedrock deployment that's tagged with the right family routes correctly.
+// current attempt. Nova is matched narrowly by its embedding-model name so
+// generative Nova models are rejected on the embeddings endpoint. Titan and
+// Cohere continue to support resolved alias-family routing.
 func DetermineEmbeddingModelType(ctx *schemas.BifrostContext, model string) (string, error) {
+	normalizedModel := strings.ToLower(model)
 	switch {
-	// Explicit match for the multimodal embeddings model — it contains "nova"
-	// but not the "lite"/"sonic" markers some Nova-2 detectors gate on, so be
-	// unambiguous here rather than relying on family substring resolution.
-	case strings.Contains(model, "nova") && strings.Contains(model, "embed"):
-		return "nova", nil
-	case schemas.IsNovaModelFamily(ctx, model):
+	case strings.Contains(normalizedModel, "nova") && strings.Contains(normalizedModel, "embed"):
 		return "nova", nil
 	case schemas.IsTitanModelFamily(ctx, model):
 		return "titan", nil
