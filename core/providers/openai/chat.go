@@ -196,12 +196,30 @@ func ToOpenAIChatRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.Bifros
 	}
 }
 
+// isKnownGoodServiceTier identifies narrowly scoped provider/model/tier
+// combinations verified directly against the provider. model must be the
+// canonical model resolved for the current provider attempt, not a client alias.
+func isKnownGoodServiceTier(provider schemas.ModelProvider, model string, tier schemas.BifrostServiceTier) bool {
+	if provider != schemas.BedrockMantle || model != "google.gemma-4-26b-a4b" {
+		return false
+	}
+	switch tier {
+	case schemas.BifrostServiceTierPriority, schemas.BifrostServiceTierFlex:
+		return true
+	default:
+		return false
+	}
+}
+
 // serviceTierForModel filters a requested tier against the final target model's
 // capabilities. Omitting an unsupported tier lets the provider use its default
 // instead of returning an unsupported-tier error.
 func serviceTierForModel(caps schemas.ModelCaps, tier *schemas.BifrostServiceTier) *schemas.BifrostServiceTier {
 	if tier == nil {
 		return nil
+	}
+	if isKnownGoodServiceTier(caps.Provider(), caps.Model(), *tier) {
+		return tier
 	}
 	fallback := true
 	if caps.Provider() == schemas.Bedrock || caps.Provider() == schemas.BedrockMantle {
