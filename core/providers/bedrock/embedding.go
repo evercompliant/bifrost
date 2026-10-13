@@ -742,11 +742,12 @@ func (r *BedrockNovaEmbeddingResponse) ToBifrostEmbeddingResponse() (*schemas.Bi
 	return bifrostResponse, nil
 }
 
-// isNovaEmbeddingModel reports whether the model, or the alias it was resolved from, names a
-// Nova embedding model: a name containing "embed" (amazon.nova-2-multimodal-embeddings-v1:0,
-// an inference-profile ARN ending in it, or an alias whose model id does). The caller has
-// already established that the model is in the Nova family.
-func isNovaEmbeddingModel(ctx *schemas.BifrostContext, model string) bool {
+// isEmbeddingModelName reports whether the model, or the alias it was resolved from, names an
+// embedding model: a name containing "embed" (amazon.nova-2-multimodal-embeddings-v1:0,
+// amazon.titan-embed-text-v2:0, an inference-profile ARN ending in one of them, or an alias
+// whose model id does). The caller has already established the model family; this tells the
+// embedding models apart from the generative ones in the same family.
+func isEmbeddingModelName(ctx *schemas.BifrostContext, model string) bool {
 	candidates := []string{model}
 	if ra := schemas.GetResolvedAlias(ctx); ra != nil {
 		candidates = append(candidates, ra.Key)
@@ -776,11 +777,16 @@ func DetermineEmbeddingModelType(ctx *schemas.BifrostContext, model string) (str
 		// everc fork: negative selection. The Nova family also holds the generative models
 		// (nova-pro, nova-lite, nova-micro, ...), which have no embedding API, so a Nova
 		// request only counts as an embedding request when an embedding model is named.
-		if !isNovaEmbeddingModel(ctx, model) {
+		if !isEmbeddingModelName(ctx, model) {
 			return "", fmt.Errorf("unsupported embedding model: %s (a Nova model that is not a Nova embedding model)", model)
 		}
 		return "nova", nil
 	case schemas.IsTitanModelFamily(ctx, model):
+		// everc fork: same negative selection for Titan, whose family holds the text and
+		// image generators (titan-text-express, titan-text-premier, titan-image-generator, ...).
+		if !isEmbeddingModelName(ctx, model) {
+			return "", fmt.Errorf("unsupported embedding model: %s (a Titan model that is not a Titan embedding model)", model)
+		}
 		return "titan", nil
 	case schemas.IsCohereModelFamily(ctx, model):
 		return "cohere", nil
