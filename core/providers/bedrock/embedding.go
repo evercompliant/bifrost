@@ -742,6 +742,29 @@ func (r *BedrockNovaEmbeddingResponse) ToBifrostEmbeddingResponse() (*schemas.Bi
 	return bifrostResponse, nil
 }
 
+// isNovaEmbeddingModel reports whether the model, or the alias it was resolved from, names a
+// Nova embedding model: a name containing "embed" (amazon.nova-2-multimodal-embeddings-v1:0,
+// an inference-profile ARN ending in it, or an alias whose model id does). The caller has
+// already established that the model is in the Nova family.
+func isNovaEmbeddingModel(ctx *schemas.BifrostContext, model string) bool {
+	candidates := []string{model}
+	if ra := schemas.GetResolvedAlias(ctx); ra != nil {
+		candidates = append(candidates, ra.Key)
+		if ra.Config != nil {
+			candidates = append(candidates, ra.Config.ModelID)
+			if ra.Config.ModelName != nil {
+				candidates = append(candidates, *ra.Config.ModelName)
+			}
+		}
+	}
+	for _, c := range candidates {
+		if strings.Contains(strings.ToLower(c), "embed") {
+			return true
+		}
+	}
+	return false
+}
+
 // DetermineEmbeddingModelType determines the embedding model type for the
 // current attempt. It consults the resolved alias family first
 // (model_family / model_name / model_id / alias key) and falls back to the
@@ -750,6 +773,12 @@ func (r *BedrockNovaEmbeddingResponse) ToBifrostEmbeddingResponse() (*schemas.Bi
 func DetermineEmbeddingModelType(ctx *schemas.BifrostContext, model string) (string, error) {
 	switch {
 	case schemas.IsNovaModelFamily(ctx, model):
+		// everc fork: negative selection. The Nova family also holds the generative models
+		// (nova-pro, nova-lite, nova-micro, ...), which have no embedding API, so a Nova
+		// request only counts as an embedding request when an embedding model is named.
+		if !isNovaEmbeddingModel(ctx, model) {
+			return "", fmt.Errorf("unsupported embedding model: %s (a Nova model that is not a Nova embedding model)", model)
+		}
 		return "nova", nil
 	case schemas.IsTitanModelFamily(ctx, model):
 		return "titan", nil
