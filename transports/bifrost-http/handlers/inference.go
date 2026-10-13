@@ -1357,6 +1357,8 @@ func prepareEmbeddingRequest(ctx *fasthttp.RequestCtx, config *lib.Config) (*Emb
 		return nil, nil, err
 	}
 	contents := req.Input.toEmbeddingInput()
+	// everc fork: keep the legacy "inputImage"/"inputImages" contract working (see lib/embedding_legacy.go).
+	contents = lib.NormalizeLegacyEmbeddingInput(contents, base.ExtraParams)
 	if len(contents) == 0 {
 		return nil, nil, fmt.Errorf("input is required for embeddings")
 	}

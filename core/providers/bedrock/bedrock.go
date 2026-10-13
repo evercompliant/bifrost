@@ -2281,6 +2281,12 @@ func (provider *BedrockProvider) Embedding(ctx *schemas.BifrostContext, key sche
 	var path string
 	var jsonData []byte
 
+	// everc fork: Nova requests without typed media parts follow our legacy contract
+	// (images as extra params, hybrid fan-out with pooling); see embedding_legacy.go.
+	if modelType == "nova" && useLegacyNovaEmbedding(request) {
+		return provider.completeLegacyNovaEmbedding(ctx, key, request)
+	}
+
 	switch modelType {
 	case "titan":
 		jsonData, bifrostError = providerUtils.CheckContextAndGetRequestBody(

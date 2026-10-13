@@ -432,7 +432,7 @@ func CreateOpenAIRouteConfigs(pathPrefix string, handlerStore lib.HandlerStore) 
 				}, nil
 			} else if openaiReq, ok := req.(*openai.OpenAIEmbeddingRequest); ok {
 				return &schemas.BifrostRequest{
-					EmbeddingRequest: openaiReq.ToBifrostEmbeddingRequest(ctx),
+					EmbeddingRequest: legacyEmbeddingRequest(openaiReq.ToBifrostEmbeddingRequest(ctx)),
 				}, nil
 			} else if openaiReq, ok := req.(*openai.OpenAISpeechRequest); ok {
 				return &schemas.BifrostRequest{
@@ -1007,7 +1007,7 @@ func CreateOpenAIRouteConfigs(pathPrefix string, handlerStore lib.HandlerStore) 
 			RequestConverter: func(ctx *schemas.BifrostContext, req interface{}) (*schemas.BifrostRequest, error) {
 				if embeddingReq, ok := req.(*openai.OpenAIEmbeddingRequest); ok {
 					return &schemas.BifrostRequest{
-						EmbeddingRequest: embeddingReq.ToBifrostEmbeddingRequest(ctx),
+						EmbeddingRequest: legacyEmbeddingRequest(embeddingReq.ToBifrostEmbeddingRequest(ctx)),
 					}, nil
 				}
 				return nil, errors.New("invalid embedding request type")
