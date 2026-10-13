@@ -532,3 +532,81 @@ func TestToBedrockTitanEmbeddingRequestLegacyImageWithPlaceholderText(t *testing
 	require.NotNil(t, req.InputImage)
 	assert.Equal(t, "BASE64DATA", *req.InputImage)
 }
+
+// Negative selection: the Nova family also holds the generative models, which must not be
+// routed to an embedding path.
+func TestDetermineEmbeddingModelTypeNovaNegativeSelection(t *testing.T) {
+	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+
+	t.Run("Nova embedding models are accepted", func(t *testing.T) {
+		for _, model := range []string{
+			"amazon.nova-2-multimodal-embeddings-v1:0",
+			"us.amazon.nova-2-multimodal-embeddings-v1:0",
+			"arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-2-multimodal-embeddings-v1:0",
+		} {
+			modelType, err := DetermineEmbeddingModelType(ctx, model)
+			require.NoError(t, err, model)
+			assert.Equal(t, "nova", modelType, model)
+		}
+	})
+
+	t.Run("generative Nova models are rejected", func(t *testing.T) {
+		for _, model := range []string{
+			"amazon.nova-pro-v1:0",
+			"amazon.nova-lite-v1:0",
+			"amazon.nova-micro-v1:0",
+			"amazon.nova-premier-v1:0",
+			"us.amazon.nova-2-lite-v1:0",
+			"amazon.nova-canvas-v1:0",
+			"amazon.nova-reel-v1:0",
+			"amazon.nova-sonic-v1:0",
+		} {
+			modelType, err := DetermineEmbeddingModelType(ctx, model)
+			require.Error(t, err, model)
+			assert.Empty(t, modelType, model)
+			assert.Contains(t, err.Error(), "unsupported embedding model", model)
+		}
+	})
+
+	t.Run("an alias is judged by the model it resolves to", func(t *testing.T) {
+		embedFamily := schemas.ModelFamilyNova
+		embedAlias := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+		embedAlias.SetValue(schemas.BifrostContextKeyResolvedAlias, &schemas.ResolvedAlias{
+			Key: "my-vectors",
+			Config: &schemas.AliasConfig{
+				ModelID:     "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.amazon.nova-2-multimodal-embeddings-v1:0",
+				ModelFamily: &embedFamily,
+			},
+		})
+		modelType, err := DetermineEmbeddingModelType(embedAlias, "my-vectors")
+		require.NoError(t, err)
+		assert.Equal(t, "nova", modelType)
+
+		genFamily := schemas.ModelFamilyNova
+		genAlias := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+		genAlias.SetValue(schemas.BifrostContextKeyResolvedAlias, &schemas.ResolvedAlias{
+			Key: "my-chat",
+			Config: &schemas.AliasConfig{
+				ModelID:     "us.amazon.nova-pro-v1:0",
+				ModelFamily: &genFamily,
+			},
+		})
+		modelType, err = DetermineEmbeddingModelType(genAlias, "my-chat")
+		require.Error(t, err)
+		assert.Empty(t, modelType)
+	})
+
+	t.Run("other families are unaffected", func(t *testing.T) {
+		for model, want := range map[string]string{
+			"amazon.titan-embed-text-v2:0": "titan",
+			"amazon.titan-embed-image-v1":  "titan",
+			"cohere.embed-v4:0":            "cohere",
+		} {
+			modelType, err := DetermineEmbeddingModelType(ctx, model)
+			require.NoError(t, err, model)
+			assert.Equal(t, want, modelType, model)
+		}
+		_, err := DetermineEmbeddingModelType(ctx, "meta.llama3-8b-instruct-v1:0")
+		require.Error(t, err)
+	})
+}
