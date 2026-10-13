@@ -102,17 +102,45 @@ func titanImagePayload(media *schemas.EmbeddingMediaPart) (string, error) {
 	return data, nil
 }
 
+// titanLegacyImagePayload turns a legacy "inputImage" extra param into the bare base64 Titan
+// expects. It accepts a data URI or raw base64 (surrounding whitespace is stripped). Titan
+// cannot fetch remote images, so a URL is refused.
+func titanLegacyImagePayload(image string) (string, error) {
+	data := strings.TrimSpace(image)
+	if strings.HasPrefix(data, "data:") {
+		info := schemas.ExtractURLTypeInfo(data)
+		if info.DataURLWithoutPrefix == nil {
+			return "", providerUtils.InvalidRequestErrorf("inputImage is not a valid data URI")
+		}
+		data = *info.DataURLWithoutPrefix
+	} else if strings.HasPrefix(data, "http://") || strings.HasPrefix(data, "https://") {
+		return "", providerUtils.InvalidRequestErrorf("this model requires inline base64 image data, not a url")
+	}
+	data = strings.NewReplacer("\n", "", "\r", "", " ", "", "\t", "").Replace(data)
+	if data == "" {
+		return "", providerUtils.InvalidRequestErrorf("inputImage is empty")
+	}
+	return data, nil
+}
+
 // ToBedrockTitanEmbeddingRequest converts a Bifrost embedding request to Bedrock Titan format
 func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest) (*BedrockTitanEmbeddingRequest, error) {
 	if bifrostReq == nil {
 		return nil, fmt.Errorf("bifrost embedding request is nil")
 	}
 
-	if len(bifrostReq.Input) == 0 {
+	// everc fork: an image may still arrive as the legacy "inputImage" extra param, with or
+	// without text. Only the first is used: Titan takes one image per request.
+	var legacyImage *string
+	if images := legacyEmbeddingImages(bifrostReq.Params); len(images) > 0 {
+		legacyImage = &images[0]
+	}
+
+	if len(bifrostReq.Input) == 0 && legacyImage == nil {
 		return nil, providerUtils.InvalidRequestErrorf("no input provided for Titan embedding")
 	}
 
-	if len(bifrostReq.Input) != 1 {
+	if len(bifrostReq.Input) > 1 {
 		return nil, providerUtils.InvalidRequestErrorf("this model supports exactly one content item per request; got %d", len(bifrostReq.Input))
 	}
 
@@ -122,9 +150,14 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 
 	multimodal := schemas.IsTitanMultimodalEmbeddingModel(bifrostReq.Model)
 
+	var content schemas.EmbeddingContent
+	if len(bifrostReq.Input) == 1 {
+		content = bifrostReq.Input[0].Content
+	}
+
 	var sb strings.Builder
 	var inputImage *string
-	for _, part := range bifrostReq.Input[0].Content {
+	for _, part := range content {
 		switch part.Type {
 		case schemas.EmbeddingContentPartTypeText:
 			if part.Text == nil {
@@ -145,6 +178,21 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 			inputImage = &encoded
 		default:
 			return nil, providerUtils.InvalidRequestErrorf("this model does not support %q parts", part.Type)
+		}
+	}
+
+	// A typed image part wins over the legacy extra param.
+	legacyImageUsed := false
+	if inputImage == nil && legacyImage != nil {
+		encoded, err := titanLegacyImagePayload(*legacyImage)
+		if err != nil {
+			return nil, err
+		}
+		inputImage = &encoded
+		legacyImageUsed = true
+		// The entry points send a single space as the text of an image-only request.
+		if strings.TrimSpace(sb.String()) == "" {
+			sb.Reset()
 		}
 	}
 
@@ -192,6 +240,10 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 		if len(bifrostReq.Params.ExtraParams) > 0 {
 			extra := make(map[string]interface{})
 			for k, v := range bifrostReq.Params.ExtraParams {
+				if k == legacyEmbeddingExtraParamInputImages || (k == legacyEmbeddingExtraParamInputImage && legacyImageUsed) {
+					// everc fork: consumed above; Titan takes at most one image
+					continue
+				}
 				if k != "normalize" && !(k == "embeddingTypes" && embeddingTypesExtracted) {
 					extra[k] = v
 				}
