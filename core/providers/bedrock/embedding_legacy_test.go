@@ -596,11 +596,54 @@ func TestDetermineEmbeddingModelTypeNovaNegativeSelection(t *testing.T) {
 		assert.Empty(t, modelType)
 	})
 
+	t.Run("generative Titan models are rejected, Titan embedding models accepted", func(t *testing.T) {
+		for _, model := range []string{
+			"amazon.titan-text-express-v1",
+			"amazon.titan-text-lite-v1",
+			"amazon.titan-text-premier-v1:0",
+			"amazon.titan-image-generator-v2:0",
+			"amazon.titan-tg1-large",
+		} {
+			modelType, err := DetermineEmbeddingModelType(ctx, model)
+			require.Error(t, err, model)
+			assert.Empty(t, modelType, model)
+			assert.Contains(t, err.Error(), "unsupported embedding model", model)
+		}
+		for _, model := range []string{
+			"amazon.titan-embed-text-v1",
+			"amazon.titan-embed-text-v2:0",
+			"amazon.titan-embed-image-v1",
+			"amazon.titan-embed-g1-text-02",
+			"us.amazon.titan-embed-text-v2:0",
+		} {
+			modelType, err := DetermineEmbeddingModelType(ctx, model)
+			require.NoError(t, err, model)
+			assert.Equal(t, "titan", modelType, model)
+		}
+
+		// An alias is judged by the model it resolves to.
+		family := schemas.ModelFamilyTitan
+		genAlias := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+		genAlias.SetValue(schemas.BifrostContextKeyResolvedAlias, &schemas.ResolvedAlias{
+			Key:    "my-text",
+			Config: &schemas.AliasConfig{ModelID: "amazon.titan-text-express-v1", ModelFamily: &family},
+		})
+		_, err := DetermineEmbeddingModelType(genAlias, "my-text")
+		require.Error(t, err)
+
+		embedAlias := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
+		embedAlias.SetValue(schemas.BifrostContextKeyResolvedAlias, &schemas.ResolvedAlias{
+			Key:    "my-vectors",
+			Config: &schemas.AliasConfig{ModelID: "amazon.titan-embed-text-v2:0", ModelFamily: &family},
+		})
+		modelType, err := DetermineEmbeddingModelType(embedAlias, "my-vectors")
+		require.NoError(t, err)
+		assert.Equal(t, "titan", modelType)
+	})
+
 	t.Run("other families are unaffected", func(t *testing.T) {
 		for model, want := range map[string]string{
-			"amazon.titan-embed-text-v2:0": "titan",
-			"amazon.titan-embed-image-v1":  "titan",
-			"cohere.embed-v4:0":            "cohere",
+			"cohere.embed-v4:0": "cohere",
 		} {
 			modelType, err := DetermineEmbeddingModelType(ctx, model)
 			require.NoError(t, err, model)
