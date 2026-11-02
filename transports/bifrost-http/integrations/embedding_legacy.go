@@ -2,7 +2,7 @@ package integrations
 
 import (
 	"github.com/maximhq/bifrost/core/schemas"
-	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
+	"github.com/maximhq/bifrost/transports/v2/bifrost-http/lib"
 )
 
 // legacyEmbeddingRequest applies the fork-only legacy "inputImage"/"inputImages" shim to a
