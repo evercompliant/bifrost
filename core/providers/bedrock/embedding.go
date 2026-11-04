@@ -102,17 +102,45 @@ func titanImagePayload(media *schemas.EmbeddingMediaPart) (string, error) {
 	return data, nil
 }
 
+// titanLegacyImagePayload turns a legacy "inputImage" extra param into the bare base64 Titan
+// expects. It accepts a data URI or raw base64 (surrounding whitespace is stripped). Titan
+// cannot fetch remote images, so a URL is refused.
+func titanLegacyImagePayload(image string) (string, error) {
+	data := strings.TrimSpace(image)
+	if strings.HasPrefix(data, "data:") {
+		info := schemas.ExtractURLTypeInfo(data)
+		if info.DataURLWithoutPrefix == nil {
+			return "", providerUtils.InvalidRequestErrorf("inputImage is not a valid data URI")
+		}
+		data = *info.DataURLWithoutPrefix
+	} else if strings.HasPrefix(data, "http://") || strings.HasPrefix(data, "https://") {
+		return "", providerUtils.InvalidRequestErrorf("this model requires inline base64 image data, not a url")
+	}
+	data = strings.NewReplacer("\n", "", "\r", "", " ", "", "\t", "").Replace(data)
+	if data == "" {
+		return "", providerUtils.InvalidRequestErrorf("inputImage is empty")
+	}
+	return data, nil
+}
+
 // ToBedrockTitanEmbeddingRequest converts a Bifrost embedding request to Bedrock Titan format
 func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest) (*BedrockTitanEmbeddingRequest, error) {
 	if bifrostReq == nil {
 		return nil, fmt.Errorf("bifrost embedding request is nil")
 	}
 
-	if len(bifrostReq.Input) == 0 {
+	// everc fork: an image may still arrive as the legacy "inputImage" extra param, with or
+	// without text. Only the first is used: Titan takes one image per request.
+	var legacyImage *string
+	if images := legacyEmbeddingImages(bifrostReq.Params); len(images) > 0 {
+		legacyImage = &images[0]
+	}
+
+	if len(bifrostReq.Input) == 0 && legacyImage == nil {
 		return nil, providerUtils.InvalidRequestErrorf("no input provided for Titan embedding")
 	}
 
-	if len(bifrostReq.Input) != 1 {
+	if len(bifrostReq.Input) > 1 {
 		return nil, providerUtils.InvalidRequestErrorf("this model supports exactly one content item per request; got %d", len(bifrostReq.Input))
 	}
 
@@ -122,9 +150,14 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 
 	multimodal := schemas.IsTitanMultimodalEmbeddingModel(bifrostReq.Model)
 
+	var content schemas.EmbeddingContent
+	if len(bifrostReq.Input) == 1 {
+		content = bifrostReq.Input[0].Content
+	}
+
 	var sb strings.Builder
 	var inputImage *string
-	for _, part := range bifrostReq.Input[0].Content {
+	for _, part := range content {
 		switch part.Type {
 		case schemas.EmbeddingContentPartTypeText:
 			if part.Text == nil {
@@ -145,6 +178,21 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 			inputImage = &encoded
 		default:
 			return nil, providerUtils.InvalidRequestErrorf("this model does not support %q parts", part.Type)
+		}
+	}
+
+	// A typed image part wins over the legacy extra param.
+	legacyImageUsed := false
+	if inputImage == nil && legacyImage != nil {
+		encoded, err := titanLegacyImagePayload(*legacyImage)
+		if err != nil {
+			return nil, err
+		}
+		inputImage = &encoded
+		legacyImageUsed = true
+		// The entry points send a single space as the text of an image-only request.
+		if strings.TrimSpace(sb.String()) == "" {
+			sb.Reset()
 		}
 	}
 
@@ -192,6 +240,10 @@ func ToBedrockTitanEmbeddingRequest(bifrostReq *schemas.BifrostEmbeddingRequest)
 		if len(bifrostReq.Params.ExtraParams) > 0 {
 			extra := make(map[string]interface{})
 			for k, v := range bifrostReq.Params.ExtraParams {
+				if k == legacyEmbeddingExtraParamInputImages || (k == legacyEmbeddingExtraParamInputImage && legacyImageUsed) {
+					// everc fork: consumed above; Titan takes at most one image
+					continue
+				}
 				if k != "normalize" && !(k == "embeddingTypes" && embeddingTypesExtracted) {
 					extra[k] = v
 				}
@@ -690,6 +742,30 @@ func (r *BedrockNovaEmbeddingResponse) ToBifrostEmbeddingResponse() (*schemas.Bi
 	return bifrostResponse, nil
 }
 
+// isEmbeddingModelName reports whether the model, or the alias it was resolved from, names an
+// embedding model: a name containing "embed" (amazon.nova-2-multimodal-embeddings-v1:0,
+// amazon.titan-embed-text-v2:0, an inference-profile ARN ending in one of them, or an alias
+// whose model id does). The caller has already established the model family; this tells the
+// embedding models apart from the generative ones in the same family.
+func isEmbeddingModelName(ctx *schemas.BifrostContext, model string) bool {
+	candidates := []string{model}
+	if ra := schemas.GetResolvedAlias(ctx); ra != nil {
+		candidates = append(candidates, ra.Key)
+		if ra.Config != nil {
+			candidates = append(candidates, ra.Config.ModelID)
+			if ra.Config.ModelName != nil {
+				candidates = append(candidates, *ra.Config.ModelName)
+			}
+		}
+	}
+	for _, c := range candidates {
+		if strings.Contains(strings.ToLower(c), "embed") {
+			return true
+		}
+	}
+	return false
+}
+
 // DetermineEmbeddingModelType determines the embedding model type for the
 // current attempt. It consults the resolved alias family first
 // (model_family / model_name / model_id / alias key) and falls back to the
@@ -698,8 +774,19 @@ func (r *BedrockNovaEmbeddingResponse) ToBifrostEmbeddingResponse() (*schemas.Bi
 func DetermineEmbeddingModelType(ctx *schemas.BifrostContext, model string) (string, error) {
 	switch {
 	case schemas.IsNovaModelFamily(ctx, model):
+		// everc fork: negative selection. The Nova family also holds the generative models
+		// (nova-pro, nova-lite, nova-micro, ...), which have no embedding API, so a Nova
+		// request only counts as an embedding request when an embedding model is named.
+		if !isEmbeddingModelName(ctx, model) {
+			return "", fmt.Errorf("unsupported embedding model: %s (a Nova model that is not a Nova embedding model)", model)
+		}
 		return "nova", nil
 	case schemas.IsTitanModelFamily(ctx, model):
+		// everc fork: same negative selection for Titan, whose family holds the text and
+		// image generators (titan-text-express, titan-text-premier, titan-image-generator, ...).
+		if !isEmbeddingModelName(ctx, model) {
+			return "", fmt.Errorf("unsupported embedding model: %s (a Titan model that is not a Titan embedding model)", model)
+		}
 		return "titan", nil
 	case schemas.IsCohereModelFamily(ctx, model):
 		return "cohere", nil
